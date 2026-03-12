@@ -25,7 +25,7 @@ export async function getExistingComment(
     octokit.rest.issues.listComments,
     parameters,
   )) {
-    found = comments.data.find(({ body }) => {
+    found = comments.data.find(({ body }: { body?: string }) => {
       return (body?.search(messageId) ?? -1) > -1
     })
 
