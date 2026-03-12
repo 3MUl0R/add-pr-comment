@@ -1,7 +1,7 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
 import { WebhookPayload } from '@actions/github/lib/interfaces'
-import { rest } from 'msw'
+import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
@@ -31,6 +31,7 @@ type Inputs = {
   'message-cancelled'?: string
   'message-skipped'?: string
   'update-only'?: string
+  'refresh-message-position'?: string
   preformatted?: string
   status?: 'success' | 'failure' | 'cancelled' | 'skipped'
 }
@@ -62,34 +63,42 @@ type MessagePayload = {
 }
 
 let messagePayload: MessagePayload | undefined
+let deleteCommentCalled = false
 
 vi.mock('@actions/core')
 
 const handlers = [
-  rest.post(
+  http.post(
     `https://api.github.com/repos/:repoUser/:repoName/issues/:issueNumber/comments`,
-    async (req, res, ctx) => {
-      messagePayload = await req.json<MessagePayload>()
-      return res(ctx.status(200), ctx.json(postIssueCommentsResponse))
+    async ({ request }) => {
+      messagePayload = (await request.json()) as MessagePayload
+      return HttpResponse.json(postIssueCommentsResponse)
     },
   ),
-  rest.patch(
+  http.patch(
     `https://api.github.com/repos/:repoUser/:repoName/issues/comments/:commentId`,
-    async (req, res, ctx) => {
-      messagePayload = await req.json<MessagePayload>()
-      return res(ctx.status(200), ctx.json(postIssueCommentsResponse))
+    async ({ request }) => {
+      messagePayload = (await request.json()) as MessagePayload
+      return HttpResponse.json(postIssueCommentsResponse)
     },
   ),
-  rest.get(
+  http.delete(
+    `https://api.github.com/repos/:repoUser/:repoName/issues/comments/:commentId`,
+    () => {
+      deleteCommentCalled = true
+      return new HttpResponse(null, { status: 204 })
+    },
+  ),
+  http.get(
     `https://api.github.com/repos/:repoUser/:repoName/issues/:issueNumber/comments`,
-    (req, res, ctx) => {
-      return res(ctx.status(200), ctx.json(getIssueCommentsResponse))
+    () => {
+      return HttpResponse.json(getIssueCommentsResponse)
     },
   ),
-  rest.get(
+  http.get(
     `https://api.github.com/repos/:repoUser/:repoName/commits/:commitSha/pulls`,
-    (req, res, ctx) => {
-      return res(ctx.status(200), ctx.json(getCommitPullsResponse))
+    () => {
+      return HttpResponse.json(getCommitPullsResponse)
     },
   ),
 ]
@@ -106,6 +115,7 @@ beforeEach(() => {
   inputs = { ...defaultInputs }
   issueNumber = defaultIssueNumber
   messagePayload = undefined
+  deleteCommentCalled = false
 
   vi.resetModules()
 
@@ -334,6 +344,32 @@ describe('add-pr-comment action', () => {
 
     expect(core.setOutput).toHaveBeenCalledWith('comment-updated', 'true')
     expect(core.setOutput).toHaveBeenCalledWith('comment-id', commentId)
+  })
+
+  it('deletes and recreates a comment when refresh-message-position is true', async () => {
+    inputs.message = simpleMessage
+    inputs['refresh-message-position'] = 'true'
+
+    const commentId = 123
+    const newCommentId = 456
+
+    const replyBody = [
+      {
+        id: commentId,
+        body: `<!-- add-pr-comment:${inputs['message-id']} -->\n\n${simpleMessage}`,
+      },
+    ]
+
+    getIssueCommentsResponse = replyBody
+    postIssueCommentsResponse = {
+      id: newCommentId,
+    }
+
+    await run()
+
+    expect(deleteCommentCalled).toBe(true)
+    expect(core.setOutput).toHaveBeenCalledWith('comment-updated', 'true')
+    expect(core.setOutput).toHaveBeenCalledWith('comment-id', newCommentId)
   })
 
   it('overrides the default message with a success message on success', async () => {
